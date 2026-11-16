@@ -1,0 +1,45 @@
+# Publishes a Nirmiti release from an upload branch.
+# Push a branch named upload/v<version> containing:
+#   latest.yml  (electron-updater manifest)
+#   parts/Nirmiti-Setup-<version>.exe.part-*  (installer split into < 50 MB pieces)
+#   notes.md    (optional release notes)
+# This workflow joins the parts, checks the sha512 against latest.yml, creates the GitHub release with the
+# installer + latest.yml as assets (what installed copies of Nirmiti download), then deletes the upload branch.
+name: publish
+on:
+  push:
+    branches: ['upload/**']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble and verify installer
+        id: build
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#upload/v}"
+          EXE="Nirmiti-Setup-$VER.exe"
+          grep -q "^version: $VER$" latest.yml
+          cat $(ls parts/"$EXE".part-* | sort) > "$EXE"
+          WANT=$(grep -m1 '^sha512:' latest.yml | awk '{print $2}')
+          GOT=$(openssl dgst -sha512 -binary "$EXE" | base64 -w0)
+          [ "$WANT" = "$GOT" ] || { echo "sha512 mismatch"; exit 1; }
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.build.outputs.ver }}"
+          NOTES="Nirmiti $VER"
+          [ -f notes.md ] && NOTES="$(cat notes.md)"
+          gh release delete "v$VER" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$VER" "${{ steps.build.outputs.exe }}" latest.yml --title "Nirmiti $VER" --notes "$NOTES" --target main --latest
+      - name: Remove upload branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git push origin --delete "$GITHUB_REF_NAME"
